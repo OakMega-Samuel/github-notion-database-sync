@@ -1,0 +1,14 @@
+{
+  "name": "github-notion-database-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-way sync of spec .md files in this repo into a Notion database.",
+  "type": "commonjs",
+  "scripts": {
+    "sync": "node scripts/sync.js"
+  },
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "@tryfabric/martian": "^1.2.4"
+  }
+}
