@@ -3,20 +3,25 @@
  * One-way sync: specs/*.md in this repo -> a Notion database.
  * Reconciles the whole specs/ tree on every run (no diffing), keyed by
  * each file's repo-relative path stored in the "File Path" property.
+ *
+ * Uses Notion's markdown API (Notion-Version 2026-03-11, @notionhq/client
+ * >=5.x): pages.create({ markdown }) and pages.updateMarkdown({ type:
+ * "replace_content" }) send/replace a page's whole body in a single call,
+ * instead of converting to block JSON and paginating list/delete/append.
  */
 const fs = require("fs");
 const path = require("path");
 const { Client } = require("@notionhq/client");
-const { markdownToBlocks } = require("@tryfabric/martian");
 
 const NOTION_API_KEY = requireEnv("NOTION_API_KEY");
-const NOTION_DATABASE_ID = requireEnv("NOTION_DATABASE_ID");
+const NOTION_DATA_SOURCE_ID = requireEnv("NOTION_DATA_SOURCE_ID");
 const REPO = process.env.GITHUB_REPOSITORY || "";
 const BRANCH = process.env.GITHUB_REF_NAME || "main";
 const SPECS_DIR = path.join(process.cwd(), "specs");
-const BLOCK_CHUNK_SIZE = 100;
 
-const notion = new Client({ auth: NOTION_API_KEY });
+// Markdown endpoints (pages.create markdown param, pages.updateMarkdown) need
+// API version 2026-03-11+; the SDK's own default is older.
+const notion = new Client({ auth: NOTION_API_KEY, notionVersion: "2026-03-11" });
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -56,20 +61,12 @@ function githubUrlFor(relPath) {
   return `https://github.com/${REPO}/blob/${BRANCH}/${relPath}`;
 }
 
-function chunk(array, size) {
-  const chunks = [];
-  for (let i = 0; i < array.length; i += size) {
-    chunks.push(array.slice(i, i + size));
-  }
-  return chunks;
-}
-
 async function queryAllPages() {
   const pages = [];
   let cursor;
   do {
-    const response = await notion.databases.query({
-      database_id: NOTION_DATABASE_ID,
+    const response = await notion.dataSources.query({
+      data_source_id: NOTION_DATA_SOURCE_ID,
       start_cursor: cursor,
       page_size: 100,
     });
@@ -84,80 +81,36 @@ function filePathOf(page) {
   return prop?.rich_text?.[0]?.plain_text ?? null;
 }
 
-async function clearChildren(pageId) {
-  let cursor;
-  do {
-    const response = await notion.blocks.children.list({
-      block_id: pageId,
-      start_cursor: cursor,
-      page_size: 100,
-    });
-    for (const block of response.results) {
-      await notion.blocks.delete({ block_id: block.id });
-    }
-    cursor = response.has_more ? response.next_cursor : undefined;
-  } while (cursor);
-}
-
-async function appendBlocks(pageId, blocks) {
-  for (const batch of chunk(blocks, BLOCK_CHUNK_SIZE)) {
-    if (batch.length === 0) continue;
-    await notion.blocks.children.append({ block_id: pageId, children: batch });
-  }
-}
-
 const LEADING_EMOJI = /^(\p{Emoji_Presentation}|\p{Extended_Pictographic})️?\s*/u;
-const DEFAULT_CALLOUT_ICON = "💡";
 
-function isBlank(richText) {
-  return !richText || richText.every((t) => !t.text?.content?.trim());
-}
-
-// Markdown blockquotes (`>`) are authored as Notion "callout" blocks, not quote
-// blocks: repo convention (see specs/example.md) is a blockquote note, and it
-// should render as a callout, picking up a leading emoji as its icon if present.
-function convertQuotesToCallouts(blocks) {
-  return blocks.map((block) => {
-    if (block.type !== "quote") {
-      for (const key of Object.keys(block)) {
-        const value = block[key];
-        if (value && Array.isArray(value.children)) {
-          value.children = convertQuotesToCallouts(value.children);
-        }
+// Repo convention (see specs/example.md): a plain markdown blockquote note
+// should render in Notion as a callout, not a quote, picking up a leading
+// emoji as its icon (Notion defaults to 💡 when no icon attribute is given).
+function convertBlockquotesToCallouts(markdown) {
+  const lines = markdown.split("\n");
+  const output = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (/^>[ \t]?/.test(lines[i])) {
+      const quoteLines = [];
+      while (i < lines.length && /^>[ \t]?/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^>[ \t]?/, ""));
+        i++;
       }
-      return block;
-    }
-
-    let richText = block.quote.rich_text;
-    let children = block.quote.children || [];
-
-    if (isBlank(richText) && children.length === 1 && children[0].type === "paragraph") {
-      richText = children[0].paragraph.rich_text;
-      children = [];
-    }
-    children = convertQuotesToCallouts(children);
-
-    let icon = DEFAULT_CALLOUT_ICON;
-    if (richText[0]?.text?.content) {
-      const match = richText[0].text.content.match(LEADING_EMOJI);
+      let text = quoteLines.join("<br>");
+      let iconAttr = "";
+      const match = text.match(LEADING_EMOJI);
       if (match) {
-        icon = match[1];
-        richText = [
-          { ...richText[0], text: { ...richText[0].text, content: richText[0].text.content.slice(match[0].length) } },
-          ...richText.slice(1),
-        ];
+        iconAttr = ` icon="${match[1]}"`;
+        text = text.slice(match[0].length);
       }
+      output.push(`<callout${iconAttr}>`, `\t${text}`, `</callout>`);
+    } else {
+      output.push(lines[i]);
+      i++;
     }
-
-    const callout = {
-      rich_text: richText,
-      icon: { type: "emoji", emoji: icon },
-      color: block.quote.color || "default",
-    };
-    if (children.length > 0) callout.children = children;
-
-    return { object: "block", type: "callout", callout };
-  });
+  }
+  return output.join("\n");
 }
 
 function buildProperties({ title, relPath, githubUrl, status }) {
@@ -178,27 +131,25 @@ async function syncFile(file, existingByPath) {
   const content = fs.readFileSync(file, "utf8");
   const title = extractTitle(content, path.basename(file, ".md"));
   const githubUrl = githubUrlFor(relPath);
-  const blocks = convertQuotesToCallouts(markdownToBlocks(content));
+  const markdown = convertBlockquotesToCallouts(content);
   const properties = buildProperties({ title, relPath, githubUrl, status: "Synced" });
 
   const existing = existingByPath.get(relPath);
   if (existing) {
     await notion.pages.update({ page_id: existing.id, properties });
-    await clearChildren(existing.id);
-    await appendBlocks(existing.id, blocks);
+    await notion.pages.updateMarkdown({
+      page_id: existing.id,
+      type: "replace_content",
+      replace_content: { new_str: markdown },
+    });
     return { relPath, action: "updated" };
   }
 
-  const firstBatch = blocks.slice(0, BLOCK_CHUNK_SIZE);
-  const rest = blocks.slice(BLOCK_CHUNK_SIZE);
-  const created = await notion.pages.create({
-    parent: { database_id: NOTION_DATABASE_ID },
+  await notion.pages.create({
+    parent: { data_source_id: NOTION_DATA_SOURCE_ID },
     properties,
-    children: firstBatch,
+    markdown,
   });
-  if (rest.length > 0) {
-    await appendBlocks(created.id, rest);
-  }
   return { relPath, action: "created" };
 }
 
@@ -215,23 +166,15 @@ async function archivePage(page) {
       "Last Synced": { date: { start: new Date().toISOString() } },
     },
   });
-  await clearChildren(page.id);
-  await appendBlocks(page.id, [
-    {
-      object: "block",
-      type: "paragraph",
-      paragraph: {
-        rich_text: [
-          {
-            type: "text",
-            text: {
-              content: `此規格書（${relPath}）已從 GitHub repo 中移除或改名，內容不再同步。`,
-            },
-          },
-        ],
-      },
+  await notion.pages.updateMarkdown({
+    page_id: page.id,
+    type: "replace_content",
+    replace_content: {
+      // Wrap the path in backticks so Notion's markdown parser doesn't
+      // auto-link a bare "*.md"-looking string.
+      new_str: `此規格書（\`${relPath}\`）已從 GitHub repo 中移除或改名，內容不再同步。`,
     },
-  ]);
+  });
   return { relPath, action: "archived" };
 }
 

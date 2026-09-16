@@ -8,7 +8,6 @@
     "sync": "node scripts/sync.js"
   },
   "dependencies": {
-    "@notionhq/client": "^2.2.15",
-    "@tryfabric/martian": "^1.2.4"
+    "@notionhq/client": "^5.26.0"
   }
 }

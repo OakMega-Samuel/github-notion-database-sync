@@ -14,7 +14,11 @@ Notion database：[產品規格書同步](https://app.notion.com/p/a5c91f7532c84
   - Notion 已有對應列 → 更新標題／內容／GitHub 連結／同步時間
   - Notion 有列但檔案已經找不到（被刪除或改名）→ 該列標記為 `Status: Archived`，並清空內容
     （不會真的刪除該列，避免不可逆的資料遺失）
-- Markdown 內容會完整轉換成 Notion 的 blocks（標題、清單、code block、表格等）。
+- 內容同步是透過 Notion 的 markdown API（`pages.create({ markdown })` /
+  `pages.updateMarkdown`）整頁覆蓋寫入，而不是逐一 block 操作，所以一份規格書無論多長，
+  一次同步只需要 1~2 次 Notion API 呼叫。
+- 規格書裡的 `>` blockquote 會轉換成 Notion 的 callout block：文字開頭若有 emoji
+  （例如 `> 💡 備註：...`）會抽出來當 callout 圖示，沒有的話預設用 💡。
 - 每一列都會有一個 `GitHub URL` 欄位，連回該規格書在 GitHub 上目前分支的原始檔案。
 
 ## 新增規格書
@@ -38,7 +42,7 @@ Notion database：[產品規格書同步](https://app.notion.com/p/a5c91f7532c84
 | Secret 名稱 | 值 |
 |---|---|
 | `NOTION_API_KEY` | 上一步拿到的 integration secret token |
-| `NOTION_DATABASE_ID` | `a5c91f7532c845e5991bc6bdadd4f429` |
+| `NOTION_DATA_SOURCE_ID` | `7d569b1c-40db-44f1-a0a2-e8010042efbb` |
 
 設定好後，之後對 `specs/**` 的每次 push 都會自動觸發同步。也可以到 Actions 分頁手動
 `Run workflow`（`workflow_dispatch`）觸發一次全量同步。
@@ -47,5 +51,5 @@ Notion database：[產品規格書同步](https://app.notion.com/p/a5c91f7532c84
 
 ```bash
 npm install
-NOTION_API_KEY=xxx NOTION_DATABASE_ID=a5c91f7532c845e5991bc6bdadd4f429 npm run sync
+NOTION_API_KEY=xxx NOTION_DATA_SOURCE_ID=7d569b1c-40db-44f1-a0a2-e8010042efbb npm run sync
 ```
