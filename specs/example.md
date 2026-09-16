@@ -16,3 +16,7 @@
 
 > 這份文件會被 GitHub Actions 自動同步到 Notion database，內容修改、
 > 新增、刪除都會單向反映到 Notion，請不要在 Notion 上直接編輯內容。
+
+## 測試更新
+
+這行是為了驗證「修改後重新同步」而加的。
