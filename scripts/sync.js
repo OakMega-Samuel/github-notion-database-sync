@@ -106,6 +106,60 @@ async function appendBlocks(pageId, blocks) {
   }
 }
 
+const LEADING_EMOJI = /^(\p{Emoji_Presentation}|\p{Extended_Pictographic})️?\s*/u;
+const DEFAULT_CALLOUT_ICON = "💡";
+
+function isBlank(richText) {
+  return !richText || richText.every((t) => !t.text?.content?.trim());
+}
+
+// Markdown blockquotes (`>`) are authored as Notion "callout" blocks, not quote
+// blocks: repo convention (see specs/example.md) is a blockquote note, and it
+// should render as a callout, picking up a leading emoji as its icon if present.
+function convertQuotesToCallouts(blocks) {
+  return blocks.map((block) => {
+    if (block.type !== "quote") {
+      for (const key of Object.keys(block)) {
+        const value = block[key];
+        if (value && Array.isArray(value.children)) {
+          value.children = convertQuotesToCallouts(value.children);
+        }
+      }
+      return block;
+    }
+
+    let richText = block.quote.rich_text;
+    let children = block.quote.children || [];
+
+    if (isBlank(richText) && children.length === 1 && children[0].type === "paragraph") {
+      richText = children[0].paragraph.rich_text;
+      children = [];
+    }
+    children = convertQuotesToCallouts(children);
+
+    let icon = DEFAULT_CALLOUT_ICON;
+    if (richText[0]?.text?.content) {
+      const match = richText[0].text.content.match(LEADING_EMOJI);
+      if (match) {
+        icon = match[1];
+        richText = [
+          { ...richText[0], text: { ...richText[0].text, content: richText[0].text.content.slice(match[0].length) } },
+          ...richText.slice(1),
+        ];
+      }
+    }
+
+    const callout = {
+      rich_text: richText,
+      icon: { type: "emoji", emoji: icon },
+      color: block.quote.color || "default",
+    };
+    if (children.length > 0) callout.children = children;
+
+    return { object: "block", type: "callout", callout };
+  });
+}
+
 function buildProperties({ title, relPath, githubUrl, status }) {
   const props = {
     Name: { title: [{ text: { content: title } }] },
@@ -124,7 +178,7 @@ async function syncFile(file, existingByPath) {
   const content = fs.readFileSync(file, "utf8");
   const title = extractTitle(content, path.basename(file, ".md"));
   const githubUrl = githubUrlFor(relPath);
-  const blocks = markdownToBlocks(content);
+  const blocks = convertQuotesToCallouts(markdownToBlocks(content));
   const properties = buildProperties({ title, relPath, githubUrl, status: "Synced" });
 
   const existing = existingByPath.get(relPath);
